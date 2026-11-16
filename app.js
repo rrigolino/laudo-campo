@@ -6,8 +6,7 @@
  * - O app só colhe dados: o laudo é gerado no computador, pelo formulário da planilha.
  */
 'use strict';
-const APP_VERSION = '1.0.0';
-const LOCK_AFTER_MS = 5 * 60 * 1000;      // bloqueia após 5 min em segundo plano
+const APP_VERSION = '1.0.1';
 const PURGE_AFTER_MS = 24 * 3600 * 1000;  // remove do tablet casos sincronizados há mais de 24 h
 const NOTAS_KEY = '__notas';              // caderno de anotações gerais (não é coluna da planilha)
 
@@ -63,7 +62,6 @@ let CFG = null;        // { u: endereço de sincronização, k: chave }
 let CACHE = null;      // { schema, presets, semQuesitos, quesitosPadrao, cid, records, ts }
 let CASES = {};        // id -> caso
 let CUR = null;        // caso aberto no formulário
-let hiddenAt = 0;
 
 function novoCaso() {
   return { id: crypto.randomUUID(), data: {}, q: { none: false, itens: [] }, ink: {}, baseStamp: '', isNew: true, dirty: false, inkDirty: false, updatedAt: Date.now(), syncedAt: 0 };
@@ -163,7 +161,7 @@ async function telaPin() {
   const meta = await idb.get('meta');
   const m = shell('Laudo — coleta em campo'); const c = el('div', 'card center'); m.appendChild(c);
   c.appendChild(el('h2', null, meta ? 'Digite o PIN' : 'Crie um PIN para este tablet'));
-  if (!meta) c.appendChild(el('div', 'hint', 'O PIN protege os dados guardados no aparelho. Use ao menos 6 caracteres (números ou uma frase curta). Se for esquecido, os dados ainda não sincronizados se perdem.'));
+  if (!meta) c.appendChild(el('div', 'hint', 'O PIN protege os dados guardados no aparelho. Ele é pedido uma vez; o tablet fica desbloqueado até você tocar em "Bloquear". Use ao menos 6 caracteres (números ou uma frase curta). Se for esquecido, os dados ainda não sincronizados se perdem.'));
   const i1 = el('input'); i1.type = 'password'; i1.autocomplete = 'off'; i1.placeholder = 'PIN'; i1.id = 'pin1'; c.appendChild(i1);
   let i2 = null;
   if (!meta) { i2 = el('input'); i2.type = 'password'; i2.autocomplete = 'off'; i2.placeholder = 'Repita o PIN'; i2.id = 'pin2'; i2.style.marginTop = '8px'; c.appendChild(i2); }
@@ -180,6 +178,7 @@ async function telaPin() {
       KEY = await derive(pin, meta.salt);
       try { await unseal(meta.check); } catch (e) { KEY = null; go.disabled = false; i1.value = ''; return msgBox(c, 'err', 'PIN incorreto.'); }
     }
+    await idb.set('sess', KEY); // mantém o tablet desbloqueado até "Bloquear" (a chave não pode ser extraída do navegador)
     await loadAll();
     CFG ? telaInicio() : telaConfig();
   });
@@ -192,11 +191,9 @@ async function telaPin() {
   }
   i1.focus();
 }
-function bloquear() { KEY = null; CFG = null; CACHE = null; CASES = {}; CUR = null; telaPin(); }
-document.addEventListener('visibilitychange', async () => {
-  if (document.hidden) { hiddenAt = Date.now(); await flushSave(); }
-  else if (KEY && hiddenAt && Date.now() - hiddenAt > LOCK_AFTER_MS) bloquear();
-});
+/** Bloqueio manual: o PIN só volta a ser pedido depois disto (não há bloqueio automático). */
+async function bloquear() { await flushSave(); await idb.del('sess'); KEY = null; CFG = null; CACHE = null; CASES = {}; CUR = null; telaPin(); }
+document.addEventListener('visibilitychange', () => { if (document.hidden) flushSave(); });
 
 /* ---------- configuração ---------- */
 function telaConfig() {
@@ -230,7 +227,7 @@ function estado(c) {
 }
 function telaInicio(aviso) {
   CUR = null;
-  const m = shell('Laudo — coleta em campo', [hbtn('Configurar', telaConfig)]);
+  const m = shell('Laudo — coleta em campo', [hbtn('Bloquear', bloquear), hbtn('Configurar', telaConfig)]);
   const c = el('div', 'card'); m.appendChild(c);
   const top = el('div', 'row'); c.appendChild(top);
   top.appendChild(btn('+ Novo caso', 'primary', () => { const n = novoCaso(); CASES[n.id] = n; telaForm(n); }));
@@ -748,9 +745,20 @@ function pdfDeJpegs(jpgs, w, h) {
 
 /* ============================ partida ============================ */
 (async function start() {
-  if ('serviceWorker' in navigator) { try { await navigator.serviceWorker.register('sw.js'); } catch (e) { /* segue sem cache offline */ } }
+  if ('serviceWorker' in navigator) {
+    const tinha = !!navigator.serviceWorker.controller;
+    // quando chega uma versão nova do app, recarrega sozinho (desde que não haja um caso aberto)
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (tinha && !CUR) location.reload(); });
+    try { await navigator.serviceWorker.register('sw.js'); } catch (e) { /* segue sem cache offline */ }
+  }
   if (navigator.storage && navigator.storage.persist) { try { await navigator.storage.persist(); } catch (e) { /* opcional */ } }
   if (!window.crypto || !crypto.subtle || !window.indexedDB) { app().textContent = 'Este navegador não oferece os recursos necessários (abra pelo Chrome, em endereço https).'; return; }
   await idbOpen();
+  // sessão mantida: se o tablet já foi desbloqueado e não houve "Bloquear", entra direto
+  const meta = await idb.get('meta'), sess = await idb.get('sess');
+  if (meta && sess) {
+    KEY = sess;
+    try { await unseal(meta.check); await loadAll(); return CFG ? telaInicio() : telaConfig(); } catch (e) { KEY = null; await idb.del('sess'); }
+  }
   telaPin();
 })();
