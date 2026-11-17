@@ -1,6 +1,6 @@
 // Service worker: guarda a "casca" do app para funcionar sem internet.
 // Ao publicar uma nova versão do app, altere VERSAO para que os tablets a baixem.
-const VERSAO = 'laudo-campo-1.0.1';
+const VERSAO = 'laudo-campo-1.0.3';
 const ARQUIVOS = ['./', 'index.html', 'app.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(VERSAO).then(c => c.addAll(ARQUIVOS)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => {

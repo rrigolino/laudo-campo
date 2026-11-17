@@ -6,7 +6,7 @@
  * - O app só colhe dados: o laudo é gerado no computador, pelo formulário da planilha.
  */
 'use strict';
-const APP_VERSION = '1.0.1';
+const APP_VERSION = '1.0.3';
 const PURGE_AFTER_MS = 24 * 3600 * 1000;  // remove do tablet casos sincronizados há mais de 24 h
 const NOTAS_KEY = '__notas';              // caderno de anotações gerais (não é coluna da planilha)
 
@@ -221,8 +221,11 @@ function hbtn(text, fn) { const b = el('button', null, text); b.type = 'button';
 
 /* ---------- início: casos no tablet e na planilha ---------- */
 function estado(c) {
-  if (c.isNew && !c.syncedAt) return ['pend', 'não enviado'];
-  if (c.dirty || c.inkDirty) return ['pend', 'alterações não enviadas'];
+  const pendente = (c.isNew && !c.syncedAt) || c.dirty || c.inkDirty;
+  if (c.concluido && pendente) return ['pend', 'concluído — aguardando envio'];
+  if (c.concluido) return ['ok', 'concluído e enviado ' + quando(c.syncedAt)];
+  if (c.isNew && !c.syncedAt) return ['pend', 'em preenchimento — não enviado'];
+  if (c.dirty || c.inkDirty) return ['pend', 'em preenchimento — alterações não enviadas'];
   return ['ok', 'sincronizado ' + quando(c.syncedAt)];
 }
 function telaInicio(aviso) {
@@ -306,7 +309,7 @@ function otherBox(f) { return document.querySelector('textarea[data-other="' + f
 
 function telaForm(c) {
   CUR = c; SCHEMA = CACHE.schema; curSec = 0;
-  const m = shell(rotuloCaso(c), [hbtn('Casos', async () => { await flushSave(); telaInicio(); })]);
+  const m = shell(rotuloCaso(c), [hbtn('Concluir caso', concluir), hbtn('Casos', async () => { await flushSave(); telaInicio(); })]);
   const nav = el('nav', 'steps'); nav.id = 'steps'; m.appendChild(nav);
   const form = el('div'); form.id = 'form'; m.appendChild(form);
   let idx = 0;
@@ -333,7 +336,7 @@ function telaForm(c) {
   const bar = el('div', 'bar');
   const bp = btn('◀ Anterior', '', () => irPara(curSec - 1)); bp.id = 'bPrev';
   const info = el('div', 'info'); info.id = 'saveInfo';
-  const bn = btn('Próxima ▶', 'primary', () => irPara(curSec + 1)); bn.id = 'bNext';
+  const bn = btn('Próxima ▶', 'primary', () => { if (curSec === nSecs() - 1) concluir(); else irPara(curSec + 1); }); bn.id = 'bNext';
   bar.appendChild(bp); bar.appendChild(info); bar.appendChild(bn); app().appendChild(bar);
 
   form.addEventListener('input', touched); form.addEventListener('change', touched);
@@ -346,7 +349,7 @@ function irPara(i) {
   if (i < 0 || i >= nSecs()) return;
   curSec = i;
   document.querySelectorAll('.sec').forEach(s => s.classList.toggle('cur', +s.dataset.i === i));
-  $('#bPrev').disabled = i === 0; $('#bNext').disabled = i === nSecs() - 1;
+  $('#bPrev').disabled = i === 0; $('#bNext').textContent = i === nSecs() - 1 ? 'Concluir caso ✓' : 'Próxima ▶';
   desenhaSteps(); window.scrollTo(0, 0);
   window.dispatchEvent(new Event('resize')); // redimensiona a área de caneta da seção exibida
 }
@@ -362,6 +365,52 @@ function faltam(sec) {
   });
   return n;
 }
+/** Campos obrigatórios em branco, por seção: [{ i, titulo, campos: [rótulos] }]. */
+function pendencias() {
+  const out = [];
+  SCHEMA.forEach((sec, i) => {
+    const campos = [], grupos = {};
+    sec.fields.forEach(f => {
+      if (!f.required) return;
+      let vazio;
+      if (f.type === 'quesitos') vazio = !!quesitosPendentes();
+      else { const v = getVal(f); vazio = (!v || (Array.isArray(v) && !v.length)) && !((CUR.ink[f.key] || 0) > 0 && f.type === 'textarea'); }
+      if (!vazio) return;
+      if (f.group) { if (!(f.group in grupos)) { grupos[f.group] = 0; campos.push(f.group); } grupos[f.group]++; } // grades: um item por grupo
+      else campos.push(f.label + (f.type === 'quesitos' ? ' (' + quesitosPendentes() + ')' : ''));
+    });
+    if (campos.length) out.push({ i: i, titulo: sec.title, campos: campos.map(c => c in grupos ? c + ' (' + grupos[c] + (grupos[c] > 1 ? ' itens' : ' item') + ')' : c), n: campos.reduce((a, c) => a + (c in grupos ? grupos[c] : 1), 0) });
+  });
+  return out;
+}
+
+/** Fecha o caso: confere pendências, marca como concluído e envia (ou deixa na fila, sem internet). */
+async function concluir(forcar) {
+  if (!CUR) return;
+  await flushSave();
+  const m = $('main'), pend = pendencias();
+  if (pend.length && forcar !== true) {
+    const n = pend.reduce((a, p) => a + p.n, 0);
+    const box = el('div');
+    box.appendChild(el('b', null, 'Faltam ' + n + ' campo(s) obrigatório(s). Pode concluir assim mesmo e completar depois, no tablet ou no computador.'));
+    const r0 = el('div', 'row'); r0.style.margin = '8px 0';
+    r0.appendChild(btn('Voltar e completar', 'small primary', () => { m.querySelector('.msgs').innerHTML = ''; irPara(pend[0].i); }));
+    r0.appendChild(btn('Concluir mesmo assim', 'small', () => concluir(true)));
+    box.appendChild(r0);
+    const ul = el('ul'); ul.style.margin = '6px 0 0 18px'; ul.style.padding = '0';
+    pend.forEach(p => { const li = el('li'); li.appendChild(el('b', null, p.titulo + ': ')); li.appendChild(document.createTextNode(p.campos.join('; '))); ul.appendChild(li); });
+    box.appendChild(ul);
+    const d = el('div', 'msg warn'); d.appendChild(box);
+    let mb = m.querySelector(':scope > .msgs'); if (!mb) { mb = el('div', 'msgs'); m.insertBefore(mb, m.firstChild); }
+    mb.innerHTML = ''; mb.appendChild(d); window.scrollTo(0, 0);
+    return;
+  }
+  const c = CUR;
+  c.concluido = Date.now(); c.updatedAt = Date.now(); await saveCase(c);
+  if (!navigator.onLine) { telaInicio('Caso concluído. Sem internet agora: ele fica guardado no tablet e é enviado quando você tocar em "Sincronizar tudo".'); return; }
+  await sincronizarLista([c], m);
+}
+
 function desenhaSteps() {
   const nav = $('#steps'); if (!nav) return; nav.innerHTML = '';
   SCHEMA.forEach((sec, i) => {
@@ -483,7 +532,7 @@ function fillForm(c) {
 /* ---------- gravação automática no tablet ---------- */
 function touched() {
   if (RESTORING || !CUR) return;
-  CUR.dirty = true; clearTimeout(saveTimer); saveTimer = setTimeout(flushSave, 700);
+  CUR.dirty = true; CUR.concluido = 0; /* editar um caso concluído o reabre */ clearTimeout(saveTimer); saveTimer = setTimeout(flushSave, 700);
   const s = $('#saveInfo'); if (s) s.textContent = 'gravando…';
 }
 async function flushSave() {
@@ -649,12 +698,13 @@ function makeInk(key, label, parent, aberto) {
     if (s.length === 3) { c.fillStyle = '#10243e'; c.beginPath(); c.arc(s[0] * k, s[1] * k, 1.6 * k, 0, 6.3); c.fill(); return; }
     for (let i = 3; i < s.length; i += 3) seg(c, k, [s[i - 3], s[i - 2], s[i - 1] / 100], [s[i], s[i + 1], s[i + 2] / 100]);
   }
-  async function load() { strokes = (await getS(inkKey(caso.id, key, page))) || []; loaded = true; redraw(); label2(); }
+  // a página aceita traços imediatamente; o que já estava guardado é juntado quando termina de carregar
+  async function load() { const novos = strokes = []; loaded = true; const salvos = (await getS(inkKey(caso.id, key, page))) || []; strokes = salvos.concat(strokes === novos ? novos : strokes); redraw(); label2(); }
   async function persist() {
     clearTimeout(saveT);
     await putS(inkKey(caso.id, key, page), strokes);
     if ((caso.ink[key] || 0) < page + 1 && strokes.length) caso.ink[key] = page + 1;
-    caso.inkDirty = true; caso.updatedAt = Date.now(); await saveCase(caso);
+    caso.inkDirty = true; caso.concluido = 0; caso.updatedAt = Date.now(); await saveCase(caso);
     const w = parent.closest('.field'); if (w && w._badge) w._badge();
     const s = $('#saveInfo'); if (s) s.textContent = 'Anotação guardada no tablet às ' + quando(Date.now()).slice(6) + ' — ainda não enviada';
     label2();
